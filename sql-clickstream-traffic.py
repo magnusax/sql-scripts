@@ -1,4 +1,4 @@
-# Query clickstream data on redshift
+# Query clickstream data on redshift on join on own table created earlier in the process
 
 query =\
 """
