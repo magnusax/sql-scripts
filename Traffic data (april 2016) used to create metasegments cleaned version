@@ -1,0 +1,355 @@
+drop table analytic.h_metacluster_cookie_behavior
+;
+--insert into analytic.h_metacluster_cookie_behavior
+select cs.visitorid
+	,cs.loginid
+	,visitnumber
+	,date(cs.hitdatetime) as EventDate
+	,cs.adid
+	,ac.adclassifiedkey
+	,act.ApplicationVertical
+	--Add all relevante effectconversions for the four verticals: 'Car', Eiendom', 'Torget', *job'
+	,sum(case when cs.eventname = 'send-message' and cs.eventconversion = 1 then 1 else 0 end) as SumSendMessageConversions
+	,sum(case when cs.eventname = 'show-phone' and cs.eventconversion = 1 then 1 else 0 end) as SumShowPhoneConversions
+	,sum(case when cs.eventname = 'add-favorite' and cs.eventconversion = 1 then 1 else 0 end) as SumAddFavoriteConversions
+	,sum(case when cs.eventname = 'add-to-calendar' and cs.eventconversion = 1 then 1 else 0 end) as SumAddToCalanderConversions
+	,sum(case when cs.eventname = 'get-realestate-brochure' and cs.eventconversion = 1 then 1 else 0 end) as SumGetRealestateBrochureConversions
+	,sum(case when cs.eventname = 'place-bid' and cs.eventconversion = 1 then 1 else 0 end) as SumPlaceBidConversions
+	,sum(case when cs.eventname = 'apply-for-position' and cs.eventconversion = 1 then 1 else 0 end) as SumApplyForPositionConversions
+	,sum(case when cs.eventname in ('send-message','show-phone','add-favorite','add-to-calendar','get-realestate-brochure','place-bid','apply-for-position') 
+	and cs.eventconversion = 1 then 1 else 0 end) as SumEffectConversions
+	,sum(cs.pageduration) as SumSecondsSpent
+
+into analytic.h_metacluster_cookie_behavior
+
+from dw_stage.s1_adobe_clickstream_201604 as cs
+	inner join dw_present.d_adclassified as ac on cs.adid = ac.adid
+	inner join dw_present.d_adclassifiedtype act on ac.AdClassifiedTypeKey=act.AdClassifiedTypeKey
+
+
+group by  cs.visitorid
+	,cs.loginid
+	,visitnumber
+	,EventDate
+	,cs.adid
+	,ac.adclassifiedkey
+	,act.ApplicationVertical
+;
+commit
+
+---creating monthly stitching by visitor id
+---START STITCHING
+
+;
+--aggregates number of hits by cookie+month+loginid
+select csb.visitorid
+			,csb.loginid
+			,cast((date_part(year,csb.eventdate)*100)+(date_part(month,csb.eventdate)) as int) as EventYearMonth
+			,count(*) as MonthlyHits
+
+into #tmp_cookie_loginidrank
+
+from analytic.h_metacluster_cookie_behavior as csb
+where csb.loginid is not null
+group by csb.visitorid,csb.loginid,cast((date_part(year,csb.eventdate)*100)+(date_part(month,csb.eventdate)) as int)
+order by csb.visitorid,monthlyhits
+;
+
+---assigns a row numer and flips the first and any second loginid up on the cookie+month grain
+select visitorid
+	,eventyearmonth
+	,max(case when rownumber = 1 then loginid else null end) as LoginIdRank1
+	,max(case when rownumber = 2 then loginid else null end) as LoginIdRank2
+	,sum(case when rownumber = 1 then monthlyhits else null end) as LoginIdRank1MonthlyHits
+	,sum(case when rownumber = 2 then monthlyhits else null end) as LoginIdRank2MonthlyHits
+
+into #tmp_cookie_stitch
+
+from (
+	select visitorid
+		,loginid
+		,eventyearmonth
+		,monthlyhits
+		,row_number () over (partition by visitorid,eventyearmonth order by monthlyhits desc) as RowNumber
+	from #tmp_cookie_loginidrank
+	) x
+group by visitorid,eventyearmonth
+;
+commit;
+
+---selects visitorid+loginid combinations where no loginid no 2 is known in that month
+drop table analytic.h_metacluster_cookie_loginidapplicable_monthlydata
+;
+select visitorid
+	,eventyearmonth
+	,loginidrank1 as LoginIdApplicable
+	
+into analytic.h_metacluster_cookie_loginidapplicable_monthlydata 
+from #tmp_cookie_stitch
+where loginidrank2 is null
+;
+---END STITCHING
+
+---Roll up and aggregate on loginid where available
+---START
+drop table analytic.h_metacluster_grunnlagsdata_applicationvertical
+;
+select case when co.loginid is not null then null
+		when st.loginidapplicable is not null then null 
+		else co.visitorid
+	end as VisitorId
+	,case when co.loginid is not null then co.loginid
+		when st.loginidapplicable is not null then st.loginidapplicable
+		else null
+	end as LoginId
+	,co.eventdate
+	,cast(((date_part(year,co.eventdate)*100) + date_part(month, co.eventdate)) as int) as EventYearMonth
+	,co.adid
+	,co.adclassifiedkey
+	,co.ApplicationVertical
+	,max(case when co.sumsendmessageconversions > 0 then 1 else 0 end) As SendMessageFlag
+	,max(case when co.sumshowphoneconversions > 0 then 1 else 0 end) As ShowPhoneFlag
+	,max(case when co.sumaddfavoriteconversions > 0 then 1 else 0 end) As FavoriteFlag
+	,max(case when co.SumAddToCalanderConversions > 0 then 1 else 0 end) As AddToCalanderFlag
+	,max(case when co.SumGetRealestateBrochureConversions > 0 then 1 else 0 end) As GetRealestateBrochureFlag
+	,max(case when co.SumPlaceBidConversions > 0 then 1 else 0 end) As PlaceBidFlag
+	,max(case when co.SumApplyForPositionConversions > 0 then 1 else 0 end) As ApplyForPositionFlag
+	,max(case when co.sumeffectconversions > 0 then 1 else 0 end) As EffectConversionFlag
+	,sum(coalesce(co.sumsecondsspent,0)) as SumSecondsSpent
+
+into analytic.h_metacluster_grunnlagsdata_applicationvertical
+
+from analytic.h_metacluster_cookie_behavior as co
+	
+	left join analytic.h_metacluster_cookie_loginidapplicable_monthlydata as st
+	on co.visitorid = st.visitorid
+	and cast(((date_part(year,co.eventdate)*100) + date_part(month, co.eventdate)) as int) = st.eventyearmonth
+
+group by case when co.loginid is not null then null
+		when st.loginidapplicable is not null then null 
+		else co.visitorid
+	end
+	,case when co.loginid is not null then co.loginid
+		when st.loginidapplicable is not null then st.loginidapplicable
+		else null end
+	,co.eventdate
+	,cast(((date_part(year,co.eventdate)*100) + date_part(month, co.eventdate)) as int)
+	,co.adid
+	,co.adclassifiedkey
+	,co.ApplicationVertical
+;
+commit
+;
+drop table analytic.h_metacluster_activity_monthly
+;
+--Per Vertical
+select case when gd.visitorid is null then cast(gd.loginid as varchar(40)) else cast(gd.visitorid as varchar(40)) end as UserId
+	,gd.visitorid
+	,gd.loginid
+	,gd.ApplicationVertical
+	,gd.eventyearmonth
+	,count(gd.adclassifiedkey) as MonthlyAdViews 
+	,count(distinct gd.adclassifiedkey) as MonthlyUniqueAdViews 
+	,count(distinct gd.eventdate) as MonthlyActiveDays
+	,sum(sendmessageflag) as MonthlySendMessage
+	,sum(showphoneflag) as MontlyShowPhone
+	,sum(favoriteflag) as MonthlyFavorite
+	,sum(addtocalanderflag) as MonthlyAddToCalander
+	,sum(getrealestatebrochureflag) as MonthlyGetRealestateBrochure
+	,sum(placebidflag) as MonthlyPlaceBid
+	,sum(applyforpositionflag) as MonthlyApplyForPosition
+	,sum(effectconversionflag) as MonthlyEffectConversion
+	,max(coalesce(p.MonthlyPublishedAds,0)) as MonthlyPublishedAds
+	,sum(coalesce(gd.SumSecondsSpent,0)) as MonthelySecondsSpent
+	
+into analytic.h_metacluster_activity_monthly
+
+from analytic.h_metacluster_grunnlagsdata_applicationvertical as gd
+
+	left join 
+		(
+		--Add publishing behavior
+		select ac.loginid
+			,pd.YearMonth as PublishYearMonth
+			,act.ApplicationVertical	
+			,count(ac.adclassifiedkey) as MonthlyPublishedAds
+		from dw_present.d_adclassified as ac
+			inner join dw_present.d_date as pd on ac.publishdatekey = pd.datekey
+			inner join dw_present.d_adclassifiedtype as act on act.adclassifiedtypekey=ac.adclassifiedtypekey
+		where ac.loginid > -1
+		and ac.publishdatekey > 20160300
+		group by ac.loginid
+			,PublishYearMonth
+			,act.ApplicationVertical
+		) as p
+		on (gd.loginid = p.loginid
+		and gd.eventyearmonth = p.PublishYearMonth
+		and gd.ApplicationVertical=p.ApplicationVertical)
+		
+group by UserId
+	,gd.visitorid
+	,gd.loginid
+	,gd.eventyearmonth
+	,gd.ApplicationVertical
+;
+drop table analytic.h_metacluster_activity_monthly_total
+;
+--Total across FINN
+select case when gd.visitorid is null then cast(gd.loginid as varchar(40)) else cast(gd.visitorid as varchar(40)) end as UserId
+	,gd.visitorid
+	,gd.loginid
+	,gd.eventyearmonth
+	,count(gd.adclassifiedkey) as MonthlyAdViews_total 
+	,count(distinct gd.adclassifiedkey) as MonthlyUniqueAdViews_total
+	,count(distinct gd.eventdate) as MonthlyActiveDays_total
+	,sum(sendmessageflag) as MonthlySendMessage_total
+	,sum(showphoneflag) as MontlyShowPhone_total
+	,sum(favoriteflag) as MonthlyFavorite_total
+	,sum(addtocalanderflag) as MonthlyAddToCalander_total
+	,sum(getrealestatebrochureflag) as MonthlyGetRealestateBrochure_total
+	,sum(placebidflag) as MonthlyPlaceBid_total
+	,sum(applyforpositionflag) as MonthlyApplyForPosition_total
+	,sum(effectconversionflag) as MonthlyEffectConversion_total
+	,max(coalesce(p.MonthlyPublishedAds,0)) as MonthlyPublishedAds_total
+	,sum(coalesce(gd.SumSecondsSpent,0)) as MonthelySecondsSpent_total
+
+into analytic.h_metacluster_activity_monthly_total
+
+from analytic.h_metacluster_grunnlagsdata_applicationvertical as gd
+
+	left join 
+		(
+		select ac.loginid
+			,pd.YearMonth as PublishYearMonth	
+			,count(ac.adclassifiedkey) as MonthlyPublishedAds
+		from dw_present.d_adclassified as ac
+			inner join dw_present.d_date as pd on ac.publishdatekey = pd.datekey
+		where ac.loginid > -1
+		and ac.publishdatekey > 20160300
+		group by ac.loginid
+			,PublishYearMonth
+		) as p
+		on (gd.loginid = p.loginid
+		and gd.eventyearmonth = p.PublishYearMonth)
+		
+group by UserId
+	,gd.visitorid
+	,gd.loginid
+	,gd.eventyearmonth
+
+;
+commit		
+;
+--Select random sample from April 2016 and look at only the verticals: 'Bil', 'Eiendom', 'Jobb' and 'Torget'		
+drop table analytic.h_metacluster_activity_monthly_random_sample_201604
+;	
+select  am.*
+
+into analytic.h_metacluster_activity_monthly_random_sample_201604
+
+from analytic.h_metacluster_activity_monthly as am
+inner join (
+	select distinct UserId userid_sample
+	from analytic.h_metacluster_activity_monthly
+	where ApplicationVertical in ('Bil', 'Eiendom', 'Jobb','Torget')
+	and eventyearmonth=201604
+	order by random()
+	limit 500000) as random_sample on random_sample.userid_sample = am.UserId
+
+where am.eventyearmonth=201604	 		
+;
+commit
+;
+drop table analytic.h_metacluster_activity_monthly_random_sample_per_vertical_201604
+;
+--Pivot and add total
+select  ams.UserId
+	,ams.visitorid
+	,ams.loginid
+	,ams.eventyearmonth
+	,1 as ind
+	,amt.MonthlyAdViews_total 
+	,amt.MonthlyUniqueAdViews_total
+	,amt.MonthlyActiveDays_total
+	,amt.MonthlySendMessage_total
+	,amt.MontlyShowPhone_total
+	,amt.MonthlyFavorite_total
+	,amt.MonthlyAddToCalander_total
+	,amt.MonthlyGetRealestateBrochure_total
+	,amt.MonthlyPlaceBid_total
+	,amt.MonthlyApplyForPosition_total
+	,amt.MonthlyEffectConversion_total
+	,amt.MonthlyPublishedAds_total
+	,amt.MonthelySecondsSpent_total
+	,sum(case when applicationvertical = 'Jobb' then monthlyadviews else 0 end) Job_monthlyadviews
+	,sum(case when applicationvertical = 'Eiendom' then monthlyadviews else 0 end) Property_monthlyadviews
+	,sum(case when applicationvertical = 'Torget' then monthlyadviews else 0 end) Torget_monthlyadviews
+	,sum(case when applicationvertical = 'Bil' then monthlyadviews else 0 end) Car_monthlyadviews
+	
+	,sum(case when applicationvertical = 'Jobb' then MonthelySecondsSpent else 0 end) Job_MonthelySecondsSpent
+	,sum(case when applicationvertical = 'Eiendom' then MonthelySecondsSpent else 0 end) Property_MonthelySecondsSpent
+	,sum(case when applicationvertical = 'Torget' then MonthelySecondsSpent else 0 end) Torget_MonthelySecondsSpent
+	,sum(case when applicationvertical = 'Bil' then MonthelySecondsSpent else 0 end) Car_MonthelySecondsSpent
+
+	,sum(case when applicationvertical = 'Torget' then monthlypublishedads else 0 end) Torget_monthlypublishedads
+	,sum(case when applicationvertical = 'Bil' then monthlypublishedads else 0 end) Car_monthlypublishedads
+	
+	,sum(case when applicationvertical = 'Torget' then MonthlySendMessage else 0 end) Torget_MonthlySendMessage
+	,sum(case when applicationvertical = 'Bil' then MonthlySendMessage else 0 end) Car_MonthlySendMessage
+	,sum(case when applicationvertical = 'Jobb' then MonthlySendMessage else 0 end) Job_MonthlySendMessage
+	,sum(case when applicationvertical = 'Eiendom' then MonthlySendMessage else 0 end) Property_MonthlySendMessage
+	
+	,sum(case when applicationvertical = 'Torget' then MontlyShowPhone else 0 end) Torget_MontlyShowPhone
+	,sum(case when applicationvertical = 'Bil' then MontlyShowPhone else 0 end) Car_MontlyShowPhone
+	,sum(case when applicationvertical = 'Jobb' then MontlyShowPhone else 0 end) Job_MontlyShowPhone
+	,sum(case when applicationvertical = 'Eiendom' then MontlyShowPhone else 0 end) Property_MontlyShowPhone
+	
+	,sum(case when applicationvertical = 'Eiendom' then MonthlyFavorite else 0 end) Property_MonthlyFavorite
+	,sum(case when applicationvertical = 'Torget' then MonthlyFavorite else 0 end) Torget_MonthlyFavorite
+	,sum(case when applicationvertical = 'Bil' then MonthlyFavorite else 0 end) Car_MonthlyFavorite
+	,sum(case when applicationvertical = 'Jobb' then MonthlyFavorite else 0 end) Job_MonthlyFavorite
+	
+	,sum(case when applicationvertical = 'Eiendom' then MonthlyAddToCalander else 0 end) Property_MonthlyAddToCalander
+	
+	,sum(case when applicationvertical = 'Eiendom' then MonthlyGetRealestateBrochure else 0 end) Property_MonthlyGetRealestateBrochure
+	
+	,sum(case when applicationvertical = 'Eiendom' then MonthlyPlaceBid else 0 end) Property_MonthlyPlaceBid
+	
+	,sum(case when applicationvertical = 'Jobb' then MonthlyApplyForPosition else 0 end) Job_MonthlyApplyForPosition
+	
+	,sum(case when applicationvertical = 'Jobb' then MonthlyEffectConversion else 0 end) Job_MonthlyEffectConversion
+	,sum(case when applicationvertical = 'Eiendom' then MonthlyEffectConversion else 0 end) Property_MonthlyEffectConversion
+	,sum(case when applicationvertical = 'Torget' then MonthlyEffectConversion else 0 end) Torget_MonthlyEffectConversion
+	,sum(case when applicationvertical = 'Bil' then MonthlyEffectConversion else 0 end) Car_MonthlyEffectConversion
+
+into analytic.h_metacluster_activity_monthly_random_sample_per_vertical_201604
+	
+from analytic.h_metacluster_activity_monthly_random_sample_201604 ams
+
+inner join analytic.h_metacluster_activity_monthly_total as amt on (ams.UserId=amt.UserId and cast(ams.eventyearmonth as int) = cast(amt.eventyearmonth as int))
+
+
+group by ams.UserId
+	,ams.visitorid
+	,ams.loginid
+	,ams.eventyearmonth
+	,ind
+	,amt.MonthlyAdViews_total 
+	,amt.MonthlyUniqueAdViews_total
+	,amt.MonthlyActiveDays_total
+	,amt.MonthlySendMessage_total
+	,amt.MontlyShowPhone_total
+	,amt.MonthlyFavorite_total
+	,amt.MonthlyAddToCalander_total
+	,amt.MonthlyGetRealestateBrochure_total
+	,amt.MonthlyPlaceBid_total
+	,amt.MonthlyApplyForPosition_total
+	,amt.MonthlyEffectConversion_total
+	,amt.MonthlyPublishedAds_total
+	,amt.MonthelySecondsSpent_total		
+;
+select top 10 *
+from analytic.h_metacluster_activity_monthly_random_sample_per_vertical_201604
+where MonthelySecondsSpent_total=0
+;
+commit
