@@ -1,0 +1,199 @@
+drop table  rebwibor.temp_AdClassifiedKeys_scibsted
+;
+--Select only AdClassifiedKey where PublishDateKey<=min(tr.DateKey)
+select *
+
+into rebwibor.temp_AdClassifiedKeys_scibsted2
+from(
+	select tr.AdClassifiedKey
+		,ac.PublishDateKey
+		,ac.UnPublishDateKey
+		,ac.AssumedSoldFlag
+		,ac.AdClassifiedTypeKey
+		,min(tr.DateKey) as minDateKey
+		,max(tr.DateKey) as maxDateKey
+	from f_TrafficAdClassified as tr
+	inner join d_adclassified as ac on tr.AdClassifiedKey=ac.AdClassifiedKey
+	where ac.PublishDateKey>=20160000
+		and ac.UnPublishDateKey >0
+	group by tr.AdClassifiedKey
+		,ac.PublishDateKey
+		,ac.UnPublishDateKey
+		,ac.AssumedSoldFlag
+		,ac.AdClassifiedTypeKey) as a
+
+--Only include ads where there is noe traffic before publishdate
+where PublishDateKey<= minDateKey
+
+;
+--BAP	
+select tac.AdClassifiedKey
+,tac.DateKey
+,b.PublishDateKey
+,b.UnPublishDateKey
+,b.AssumedSoldFlag
+,acb.MainCategory
+,acb.SubCategory
+,acb.SubCategory2
+,sum(tac.Views) as daily_views
+,sum(tac.Visits) as daily_visits
+
+from f_TrafficAdClassified as tac
+
+inner join d_adclassifiedbap as acb on acb.AdclassifiedKey=tac.AdclassifiedKey
+inner join d_adclassified as ac on ac.AdclassifiedKey=acb.AdclassifiedKey
+inner join rebwibor.temp_AdClassifiedKeys_scibsted as b on b.AdClassifiedKey=tac.AdClassifiedKey
+
+where tac.DateKey>=20160000
+  and tac.DateKey<=b.UnPublishDateKey
+  and b.AssumedSoldFlag=1 
+  and ac.DirectPartner='MinFINN'
+  and ac.AdTradeType='Til salgs'
+
+group by tac.AdClassifiedKey
+,tac.DateKey
+,b.PublishDateKey
+,b.UnPublishDateKey
+,b.AssumedSoldFlag
+,acb.MainCategory
+,acb.SubCategory
+,acb.SubCategory2
+
+order by tac.AdClassifiedKey
+,tac.DateKey
+;
+--Housing for rent
+select tac.AdClassifiedKey
+	,tac.DateKey
+	,b.PublishDateKey
+	,b.UnPublishDateKey
+	,b.AssumedSoldFlag
+	,act.ApplicationVertical
+	,act.AdClassifiedType
+	,acp.PropertyType
+	,sum(tac.Views) as daily_views
+
+from f_TrafficAdClassified as tac
+
+inner join d_adclassifiedproperty as acp on acp.AdclassifiedKey=tac.AdclassifiedKey
+inner join d_adclassified as ac on ac.AdclassifiedKey=acp.AdclassifiedKey
+inner join rebwibor.temp_AdClassifiedKeys_scibsted2 as b on b.AdClassifiedKey=tac.AdClassifiedKey
+
+inner join d_adclassifiedtype as act on b.AdClassifiedTypeKey=act.AdClassifiedTypeKey
+
+where tac.DateKey>=20160000
+	and tac.DateKey<=b.UnPublishDateKey
+	and b.AssumedSoldFlag=1 
+	and act.AdClassifiedType='Bolig til leie'
+	and acp.PropertyType not in ('Garasje/Parkering')
+    and ac.DirectPartner='MinFINN'
+	and ac.AdTradeType='Til leie'
+
+group by tac.AdClassifiedKey
+	,tac.DateKey
+	,b.PublishDateKey
+	,b.UnPublishDateKey
+	,b.AssumedSoldFlag
+	,act.ApplicationVertical
+	,act.AdClassifiedType
+	,acp.PropertyType
+
+order by tac.AdClassifiedKey
+	,tac.DateKey
+	
+;
+--Motor
+select tac.AdClassifiedKey
+	,tac.DateKey
+	,b.PublishDateKey
+	,b.UnPublishDateKey
+	,b.AssumedSoldFlag
+	,act.ApplicationVertical
+	,act.AdClassifiedType
+	,sum(tac.Views) as daily_views
+	,sum(tac.Visits) as daily_visits
+
+from f_TrafficAdClassified as tac
+
+inner join d_adclassifiedmotor as acb on acb.AdclassifiedKey=tac.AdclassifiedKey
+inner join d_adclassified as ac on ac.AdclassifiedKey=tac.AdclassifiedKey
+inner join rebwibor.temp_AdClassifiedKeys_scibsted2 as b on b.AdClassifiedKey=tac.AdClassifiedKey
+
+inner join d_adclassifiedtype as act on b.AdClassifiedTypeKey=act.AdClassifiedTypeKey
+
+where tac.DateKey>=20160000
+  and tac.DateKey<=b.UnPublishDateKey
+  and b.AssumedSoldFlag=1 
+  and act.AdClassifiedType in ('Lastebil og henger', 'Biler til salgs',
+  'Nye biler til salgs', 'MC til salgs', 'Ny MC til salgs')
+  and ac.DirectPartner='MinFinn'
+  and ac.IadProduct not in ('Snøscooter til salgs, Høyverdi, Basis',
+  'Snøscooter til salgs, Høyverdi, Pluss',
+  'Snøscooter til salgs, Lavverdi, Basis',
+  'Snøscooter til salgs, Lavverdi, Pluss',
+  'ATV til salgs, Høyverdi, Basis',
+  'ATV til salgs, Høyverdi, Pluss',
+  'ATV til salgs, Lavverdi, Basis',
+  'ATV til salgs, Lavverdi, Pluss')
+  and ac.AdTradeType='Til salgs'
+  
+group by tac.AdClassifiedKey
+	,tac.DateKey
+	,b.PublishDateKey
+	,b.UnPublishDateKey
+	,b.AssumedSoldFlag
+	,act.ApplicationVertical
+	,act.AdClassifiedType
+
+order by tac.AdClassifiedKey
+	,tac.DateKey
+;
+--Device share per day
+select a.DayKey
+	,BusinessUnit
+	,a.views_per_Mobil/b.views_total as Mobil_share
+	,c.views_per_Tablet/b.views_total as Tablet_share
+	
+from(
+--Mobile share
+	select tv.BusinessUnit
+		,DeviceType
+		,DayKey
+		,cast(sum(Views) as float) as views_per_Mobil
+	from f_trafficdaily as td
+	inner join d_devicetype as de on de.DeviceTypeKey=td.DeviceTypeKey
+	inner join d_trafficVertical tv on tv.TrafficVerticalKey = td.TrafficVerticalKey
+	where DayKey>=20160000
+		and DeviceType in ('Mobil')
+		and tv.BusinessUnit in ('Motor', 'Eiendom', 'Torget')
+	group by tv.BusinessUnit
+		,DeviceType
+		,DayKey) as a
+
+inner join (
+--Tablet share
+	select tv.BusinessUnit as BusinessUnit3
+		,DeviceType
+		,DayKey as DayKey3
+		,cast(sum(Views) as float) as views_per_Tablet
+	from f_trafficdaily as td
+	inner join d_devicetype as de on de.DeviceTypeKey=td.DeviceTypeKey
+	inner join d_trafficVertical tv on tv.TrafficVerticalKey = td.TrafficVerticalKey
+	where DayKey>=20160000
+		and DeviceType in ('Tablet')
+		and tv.BusinessUnit in ('Motor', 'Eiendom', 'Torget')
+	group by tv.BusinessUnit
+		,DeviceType
+		,DayKey) as c  on (a.DayKey=c.DayKey3 and a.BusinessUnit=c.BusinessUnit3)
+		
+inner join(	
+	select tv.BusinessUnit as BusinessUnit2
+		,DayKey as DayKey2
+		,cast(sum(Views) as float) as views_total
+	from f_trafficdaily as td
+	inner join d_trafficVertical tv on tv.TrafficVerticalKey = td.TrafficVerticalKey
+	where DayKey>=20160000
+		and tv.BusinessUnit in ('Motor', 'Eiendom', 'Torget')
+	group by tv.BusinessUnit
+		,DayKey2) as b on (a.DayKey=b.DayKey2 and a.BusinessUnit=b.BusinessUnit2)	
+	
